@@ -1,0 +1,174 @@
+blueprint:
+  name: "Battery Monitor — Notifica automatica batterie scariche"
+  description: >-
+    Monitora automaticamente tutti i dispositivi a batteria e invia una notifica
+    giornaliera quando uno o più dispositivi scendono sotto la soglia configurata.
+    La notifica apre direttamente la plancia dedicata.
+
+
+    **Modalità notifica:**
+
+    - **Tutti i dispositivi** (default): usa notify.notify e raggiunge automaticamente tutti i telefoni con l'app Companion collegati all'account HA. Zero configurazione.
+
+    - **Dispositivi specifici**: seleziona l'opzione avanzata e inserisci uno o più servizi separati da virgola (es. mobile_app_iphone_mario, mobile_app_pixel_luigi).
+
+
+    **Installazione:**
+
+    1. Importa questo progetto dall'URL
+
+    2. Crea una nuova automazione dal progetto
+
+    3. Configura soglia, orario e destinatari dall'UI
+
+    4. Aggiungi la scheda alla tua plancia (vedi README: https://github.com/dmsmartech/battery-monitor-ha)
+
+
+  domain: automation
+  input:
+
+    alert_threshold:
+      name: Soglia batteria scarica (%)
+      description: I dispositivi sotto questa percentuale verranno segnalati nella notifica.
+      default: 15
+      selector:
+        number:
+          min: 0
+          max: 60
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    notify_time:
+      name: Orario notifica giornaliera
+      description: A che ora vuoi ricevere la notifica (se ci sono batterie scariche).
+      default: "09:00:00"
+      selector:
+        time: {}
+
+    dashboard_path:
+      name: Path della plancia batterie
+      description: >-
+        Il path della plancia dedicata da aprire al tap della notifica.
+
+        Formato corretto per app Companion: /nome-plancia
+
+        - Se vuoi usare la plancia **Manutenzione** di HomeAssistant 2026.5, puoi lasciare: **/maintenance**
+
+        - Se vuoi usare la plancia personalizzata, sostituisci **/maintenance** con il percorso URL della tua plancia.
+      default: "/maintenance"
+      selector:
+        text: {}
+
+    notify_mode:
+      name: Destinatari notifica
+      description: >-
+        Scegli a chi inviare la notifica.
+
+        - Tutti: manda a tutti i dispositivi Companion collegati all'account (consigliato, zero config).
+
+        - Specifici: scegli tu quali dispositivi ricevono la notifica (avanzato).
+      default: "all"
+      selector:
+        select:
+          options:
+            - label: "Tutti i dispositivi Companion (consigliato)"
+              value: "all"
+            - label: "Dispositivi specifici (avanzato)"
+              value: "custom"
+
+    notify_custom_targets:
+      name: Dispositivi specifici (solo se hai scelto Avanzato)
+      description: >-
+        Inserisci i nomi dei servizi separati da virgola, SENZA il prefisso notify.
+
+        Esempio: mobile_app_iphone_mario, mobile_app_pixel_luigi
+
+        Dove trovo i nomi? Strumenti sviluppatore → Servizi → cerca notify.mobile_app_
+
+        Lascia vuoto se hai scelto Tutti i dispositivi.
+      default: ""
+      selector:
+        text:
+          multiline: false
+
+variables:
+  threshold: !input alert_threshold
+  dash_path: !input dashboard_path
+  notify_mode: !input notify_mode
+  notify_custom_targets: !input notify_custom_targets
+
+  notify_services: >
+    {% if notify_mode == 'all' %}
+      {{ ['notify'] }}
+    {% else %}
+      {% set raw = notify_custom_targets | trim %}
+      {% if raw == '' %}
+        {{ ['notify'] }}
+      {% else %}
+        {{ raw.split(',') | map('trim') | reject('eq', '') | list }}
+      {% endif %}
+    {% endif %}
+
+trigger:
+  - platform: time
+    at: !input notify_time
+
+condition:
+  - condition: template
+    value_template: >
+      {% set soglia = threshold | float(default=15) %}
+      {% set ns = namespace(count=0) %}
+      {% for s in states.sensor %}
+        {% if s.attributes.get('device_class') == 'battery'
+           and s.attributes.get('unit_of_measurement') == '%'
+           and s.state not in ['unknown', 'unavailable', 'none']
+           and s.state | float(default=100) < soglia %}
+          {% set ns.count = ns.count + 1 %}
+        {% endif %}
+      {% endfor %}
+      {{ ns.count > 0 }}
+
+action:
+  - variables:
+      low_batteries: >
+        {% set soglia = threshold | float(default=15) %}
+        {% set ns = namespace(items=[]) %}
+        {% for s in states.sensor %}
+          {% if s.attributes.get('device_class') == 'battery'
+             and s.attributes.get('unit_of_measurement') == '%'
+             and s.state not in ['unknown', 'unavailable', 'none']
+             and s.state | float(default=100) < soglia %}
+            {% set ns.items = ns.items + [s.name ~ ' (' ~ s.state | int ~ '%)'] %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.items | sort }}
+      low_count: >
+        {% set soglia = threshold | float(default=15) %}
+        {% set ns = namespace(count=0) %}
+        {% for s in states.sensor %}
+          {% if s.attributes.get('device_class') == 'battery'
+             and s.attributes.get('unit_of_measurement') == '%'
+             and s.state not in ['unknown', 'unavailable', 'none']
+             and s.state | float(default=100) < soglia %}
+            {% set ns.count = ns.count + 1 %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.count }}
+      notify_message: >
+        {{ low_count }} dispositivi sotto il {{ threshold | int }}%. Tocca per vedere la lista.
+
+  - repeat:
+      for_each: "{{ notify_services }}"
+      sequence:
+        - action: "notify.{{ repeat.item }}"
+          data:
+            title: "🔋 {{ low_count }} batter{{ 'ia' if low_count == 1 else 'ie' }} scari{{ 'ca' if low_count == 1 else 'che' }}"
+            message: "{{ notify_message }}"
+            data:
+              url: "{{ dash_path }}"
+              clickAction: "{{ dash_path }}"
+              push:
+                interruption-level: time-sensitive
+
+mode: single
